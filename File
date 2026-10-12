@@ -1,1 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bio Buddy</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="top-bar">
+      <div class="brand">
+        <span id="bot-emoji" class="brand-emoji"></span>
+        <div>
+          <h1 id="bot-name"></h1>
+          <p id="bot-tagline"></p>
+        </div>
+      </div>
+      <div class="top-buttons">
+        <button id="key-btn" class="ghost-btn" type="button">🔑 API key</button>
+        <button id="new-chat-btn" class="ghost-btn" type="button">New chat</button>
+      </div>
+    </header>
 
+    <main id="messages" class="messages" aria-live="polite"></main>
+
+    <div id="starters" class="starters"></div>
+
+    <form id="chat-form" class="input-row">
+      <textarea
+        id="user-input"
+        rows="1"
+        placeholder="Type your question..."
+        aria-label="Type your question"
+      ></textarea>
+      <button id="send-btn" type="submit">Send</button>
+    </form>
+  </div>
+
+  <!-- API key pop-up -->
+  <div id="key-modal" class="modal" hidden>
+    <div class="modal-box">
+      <h2>Add your Gemini API key</h2>
+      <p>
+        Get a free key at
+        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>,
+        then paste it below. It stays in your browser only.
+      </p>
+      <input id="key-input" type="password" placeholder="Paste your API key here" autocomplete="off" />
+      <label class="remember">
+        <input id="remember-box" type="checkbox" />
+        Remember on this device
+      </label>
+      <div class="modal-buttons">
+        <button id="key-cancel" class="ghost-btn" type="button">Cancel</button>
+        <button id="key-save" type="button">Save key</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
