@@ -38,6 +38,7 @@ How to answer:
     "How can I remember the steps of cellular respiration?",
     "Quiz me on DNA replication!"
   ],
+
   // Which Gemini model to use
   model: "gemini-flash-latest",
 
