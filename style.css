@@ -221,3 +221,4 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   .brand p { display: none; }
   .bubble { max-width: 92%; }
 }
+.starters[hidden] { display: none; }
