@@ -40,7 +40,7 @@ How to answer:
   ],
 
   // Which Gemini model to use
-  model: "gemini-flash-latest",
+  model: "gemini-2.5-flash",
 
   // Main color (hex code)
   themeColor: "#BA0C2F"
