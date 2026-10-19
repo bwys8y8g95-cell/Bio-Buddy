@@ -43,5 +43,37 @@ How to answer:
   model: "gemini-flash-latest",
 
   // Main color (hex code)
-  themeColor: "#BA0C2F"
+  themeColor: "#BA0C2F",
+
+  // ------------------------------------------------------------
+  //  KNOWLEDGE BASE (RAG)
+  //  These settings let the bot answer from your own notes.
+  // ------------------------------------------------------------
+
+  // true = the bot looks in your notes before answering.
+  // false = the bot works exactly like before, with no notes.
+  useKnowledge: true,
+
+  // The file that holds your notes. It must be in the same
+  // folder as index.html. Each note starts with "## Title".
+  knowledgeFile: "knowledge.md",
+
+  // How the bot finds the right notes:
+  //   "meaning"  = finds notes that mean the same thing as the question
+  //                (smarter, needs your API key)
+  //   "keywords" = finds notes that share words with the question
+  //                (simpler, works without extra setup)
+  // If "meaning" fails, the bot switches to keywords by itself.
+  searchMethod: "meaning",
+
+  // How many notes to hand to the AI with each question.
+  // 3 is a good start. More notes = more context but more noise.
+  topK: 3,
+
+  // The Gemini model that turns notes into numbers for "meaning" search.
+  embeddingModel: "gemini-embedding-2",
+
+  // Extra rules added to the bot's instructions when notes are used.
+  knowledgeRules: `You will receive NOTES from my knowledge file along with each question.
+If the notes answer the question, base your answer on them and cite the note numbers like [1]. If they don't, begin with 'I couldn't find that in my notes.' Never invent facts, dates, rules or policies that are not in the notes.`
 };
