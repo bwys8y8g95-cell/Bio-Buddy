@@ -39,41 +39,34 @@ How to answer:
     "Quiz me on DNA replication!"
   ],
 
-  // Which Gemini model to use
-  model: "gemini-flash-latest",
+  // Which Gemini model writes the answers
+  model: "gemini-2.5-flash",
 
   // Main color (hex code)
   themeColor: "#BA0C2F",
 
-  // ------------------------------------------------------------
+  // ==========================================================
   //  KNOWLEDGE BASE (RAG)
-  //  These settings let the bot answer from your own notes.
-  // ------------------------------------------------------------
+  //  Lets the bot look up your own notes before it answers.
+  // ==========================================================
 
-  // true = the bot looks in your notes before answering.
-  // false = the bot works exactly like before, with no notes.
+  // true = use your notes. false = turn the knowledge base off.
   useKnowledge: true,
 
-  // The file that holds your notes. It must be in the same
-  // folder as index.html. Each note starts with "## Title".
+  // The name of your notes file in the repository.
   knowledgeFile: "knowledge.md",
 
-  // How the bot finds the right notes:
-  //   "meaning"  = finds notes that mean the same thing as the question
-  //                (smarter, needs your API key)
-  //   "keywords" = finds notes that share words with the question
-  //                (simpler, works without extra setup)
-  // If "meaning" fails, the bot switches to keywords by itself.
+  // "meaning" = finds notes by meaning (best).
+  // "keywords" = finds notes by matching words (simple backup).
   searchMethod: "meaning",
 
-  // How many notes to hand to the AI with each question.
-  // 3 is a good start. More notes = more context but more noise.
+  // How many of the best-matching notes to send with each question.
+  // Try 4 or 5 if the right note is often ranked below 3rd.
   topK: 3,
 
-  // The Gemini model that turns notes into numbers for "meaning" search.
+  // The Gemini model that turns text into embeddings (meaning numbers).
   embeddingModel: "gemini-embedding-2",
 
-  // Extra rules added to the bot's instructions when notes are used.
-  knowledgeRules: `You will receive NOTES from my knowledge file along with each question.
-If the notes answer the question, base your answer on them and cite the note numbers like [1]. If they don't, begin with 'I couldn't find that in my notes.' Never invent facts, dates, rules or policies that are not in the notes.`
+  // Extra rules added to the system instructions when notes are used.
+  knowledgeRules: `You will receive NOTES from my knowledge file along with each question. If the notes answer the question, base your answer on them and cite the note numbers like [1]. If they don't, begin with 'I couldn't find that in my notes.' Never invent facts, dates, rules or policies that are not in the notes.`
 };
