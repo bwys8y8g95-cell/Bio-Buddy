@@ -40,7 +40,7 @@ How to answer:
   ],
 
   // Which Gemini model writes the answers
-  model: "gemini-2.5-flash",
+  model: "gemini-flash-latest",
 
   // Main color (hex code)
   themeColor: "#BA0C2F",
