@@ -1,10 +1,14 @@
 // ============================================================
 //  Bio Buddy logic. You shouldn't need to edit this file.
-//  Change the bot's personality in config.js instead.
+//  Change the bot's personality and settings in config.js.
 // ============================================================
 
 const cfg = BOT_CONFIG;
 const $ = (id) => document.getElementById(id);
+
+const API_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
+const KEY_NAME = "gemini_api_key";
+const CACHE_NAME = "biobuddy_note_vectors";
 
 const messagesEl = $("messages");
 const startersEl = $("starters");
@@ -16,30 +20,12 @@ const keyInput = $("key-input");
 const rememberBox = $("remember-box");
 const statusEl = $("kb-status");
 
-let history = []; // conversation sent to Gemini (plain questions, no notes)
+let history = []; // plain questions and answers sent to Gemini
 let busy = false;
 
-// ---------- Knowledge base settings (read from config.js) ----------
-const API_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
-const KB_USE = cfg.useKnowledge !== false;
-const KB_FILE = cfg.knowledgeFile || "knowledge.md";
-const KB_METHOD = cfg.searchMethod === "keywords" ? "keywords" : "meaning";
-const KB_TOPK = Math.max(1, Math.floor(Number(cfg.topK) || 3));
-const KB_MODEL = cfg.embeddingModel || "gemini-embedding-2";
-const KB_MAX_CHARS = 1500; // notes longer than this are split into parts
-const KB_BATCH = 50; // most notes sent to the embedding service at once
-const KB_CACHE_KEY = "bio_buddy_embeddings";
-
-// What the bot currently knows about your notes
-const kb = {
-  notes: [], // [{ title, text }]
-  vectors: null, // one list of numbers per note (meaning search)
-  problem: "", // a message if the file is missing or empty
-  wantsKey: false, // true when meaning search is waiting for an API key
-  queryFailed: false // true when the last question couldn't use meaning search
-};
-let kbRun = 0; // lets us ignore out-of-date loads
-let kbPromise = Promise.resolve();
+// The knowledge base
+let kb = { raw: "", chunks: [], vectors: null, problem: "", embedError: "" };
+let embedPromise = null;
 
 // ---------- Setup ----------
 function setup() {
@@ -49,7 +35,7 @@ function setup() {
   $("bot-name").textContent = cfg.name;
   $("bot-tagline").textContent = cfg.tagline;
   startChat();
-  kbPromise = loadKnowledge();
+  loadKnowledge();
 }
 
 function startChat() {
@@ -107,17 +93,13 @@ function formatText(text) {
 }
 
 // ---------- Chat bubbles ----------
-// "sources" is an optional list of notes shown under a bot reply.
-function addBubble(type, text, sources) {
+function addBubble(type, text) {
   const div = document.createElement("div");
   div.className = "bubble " + type;
-  if (type === "user") {
-    div.textContent = text;
-  } else if (type === "error") {
+  if (type === "user" || type === "error") {
     div.textContent = text;
   } else {
     div.innerHTML = formatText(text);
-    if (sources && sources.length) div.appendChild(buildSources(sources));
   }
   messagesEl.appendChild(div);
   scrollDown();
@@ -134,75 +116,59 @@ function addThinking() {
   return div;
 }
 
+// The small "Sources" section under an answer
+function addSources(bubble, sources, method) {
+  if (!sources.length) return;
+  const box = document.createElement("details");
+  box.className = "sources";
+  const sum = document.createElement("summary");
+  sum.textContent = "📚 Sources (" + (method === "meaning" ? "meaning" : "keyword") + " search)";
+  box.appendChild(sum);
+  sources.forEach((s, i) => {
+    const item = document.createElement("div");
+    item.className = "source-item";
+    const head = document.createElement("strong");
+    head.textContent = "[" + (i + 1) + "] " + s.chunk.title + " · score " + s.score.toFixed(2);
+    const preview = document.createElement("p");
+    const t = s.chunk.text;
+    preview.textContent = t.length > 160 ? t.slice(0, 160).trim() + "…" : t;
+    item.appendChild(head);
+    item.appendChild(preview);
+    box.appendChild(item);
+  });
+  bubble.appendChild(box);
+  scrollDown();
+}
+
 function scrollDown() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
-// ---------- "Sources" section under replies ----------
-function snippet(text) {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > 160 ? flat.slice(0, 160).trim() + "…" : flat;
-}
-
-function buildSources(notes) {
-  const details = document.createElement("details");
-  details.className = "sources";
-
-  const summary = document.createElement("summary");
-  summary.textContent = "Sources (" + notes.length + ")";
-  details.appendChild(summary);
-
-  const list = document.createElement("ol");
-  notes.forEach((n, i) => {
-    const li = document.createElement("li");
-
-    const head = document.createElement("div");
-    head.className = "source-head";
-    const title = document.createElement("strong");
-    title.textContent = "[" + (i + 1) + "] " + n.title;
-    const score = document.createElement("span");
-    score.className = "source-score";
-    score.textContent = "score " + n.score.toFixed(2);
-    head.appendChild(title);
-    head.appendChild(score);
-
-    const body = document.createElement("p");
-    body.className = "source-snippet";
-    body.textContent = snippet(n.text);
-
-    li.appendChild(head);
-    li.appendChild(body);
-    list.appendChild(li);
-  });
-  details.appendChild(list);
-  return details;
 }
 
 // ---------- API key storage ----------
 function getKey() {
   try {
-    const s = sessionStorage.getItem("gemini_api_key");
+    const s = sessionStorage.getItem(KEY_NAME);
     if (s) return s;
   } catch (e) {}
   try {
-    const l = localStorage.getItem("gemini_api_key");
+    const l = localStorage.getItem(KEY_NAME);
     if (l) return l;
   } catch (e) {}
   return "";
 }
 
 function saveKey(key, remember) {
-  try { sessionStorage.setItem("gemini_api_key", key); } catch (e) {}
+  try { sessionStorage.setItem(KEY_NAME, key); } catch (e) {}
   try {
-    if (remember) localStorage.setItem("gemini_api_key", key);
-    else localStorage.removeItem("gemini_api_key");
+    if (remember) localStorage.setItem(KEY_NAME, key);
+    else localStorage.removeItem(KEY_NAME);
   } catch (e) {}
 }
 
 function openKeyModal() {
   keyInput.value = "";
   let remembered = false;
-  try { remembered = !!localStorage.getItem("gemini_api_key"); } catch (e) {}
+  try { remembered = !!localStorage.getItem(KEY_NAME); } catch (e) {}
   rememberBox.checked = remembered;
   keyModal.hidden = false;
   keyInput.focus();
@@ -210,310 +176,6 @@ function openKeyModal() {
 
 function closeKeyModal() {
   keyModal.hidden = true;
-}
-
-// ---------- Knowledge base: loading your notes ----------
-function setStatus(text, warn) {
-  if (!KB_USE) {
-    statusEl.hidden = true;
-    return;
-  }
-  statusEl.textContent = text;
-  statusEl.classList.toggle("warn", !!warn);
-  statusEl.hidden = false;
-}
-
-function showKbStatus() {
-  if (kb.problem) {
-    setStatus("📚 " + kb.problem, true);
-    return;
-  }
-  const n = kb.notes.length;
-  const label = n === 1 ? "1 note" : n + " notes";
-  if (kb.vectors && !kb.queryFailed) {
-    setStatus("📚 " + label + " loaded · meaning search");
-    return;
-  }
-  let why = "";
-  let warn = false;
-  if (KB_METHOD === "meaning") {
-    if (kb.wantsKey) {
-      why = " (add your API key to use meaning search)";
-    } else {
-      why = " (meaning search isn't working right now)";
-      warn = true;
-    }
-  }
-  setStatus("📚 " + label + " loaded · keyword search" + why, warn);
-}
-
-// Turns the text of knowledge.md into a list of notes.
-// Everything above the first "## " line is ignored.
-function parseKnowledge(raw) {
-  const lines = raw.replace(/\r\n?/g, "\n").split("\n");
-  const found = [];
-  let current = null;
-  for (const line of lines) {
-    const m = line.match(/^##\s+(.+?)\s*$/);
-    if (m) {
-      current = { title: m[1], lines: [] };
-      found.push(current);
-    } else if (current) {
-      current.lines.push(line);
-    }
-  }
-
-  const notes = [];
-  for (const f of found) {
-    const body = f.lines.join("\n").trim();
-    if (!body) continue;
-    const parts = splitLong(body);
-    parts.forEach((part, i) => {
-      const title = parts.length > 1 ? f.title + " (part " + (i + 1) + ")" : f.title;
-      notes.push({ title: title, text: part });
-    });
-  }
-  return notes;
-}
-
-// Splits a long note at blank lines so each part stays under KB_MAX_CHARS.
-function splitLong(body) {
-  if (body.length <= KB_MAX_CHARS) return [body];
-  const paragraphs = body.split(/\n\s*\n/);
-  const parts = [];
-  let current = "";
-  for (const p of paragraphs) {
-    if (current && current.length + 2 + p.length > KB_MAX_CHARS) {
-      parts.push(current);
-      current = p;
-    } else {
-      current = current ? current + "\n\n" + p : p;
-    }
-  }
-  if (current) parts.push(current);
-  return parts;
-}
-
-// A short "fingerprint" of the notes file. If the file changes, the
-// fingerprint changes, and the saved embeddings are made again.
-function fingerprint(raw) {
-  const s = KB_MODEL + "|" + KB_MAX_CHARS + "|" + raw;
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
-  }
-  return h.toString(16) + "-" + s.length;
-}
-
-function readCache(fp) {
-  try {
-    const c = JSON.parse(localStorage.getItem(KB_CACHE_KEY));
-    if (c && c.fp === fp && Array.isArray(c.vectors) && c.vectors.length === kb.notes.length) {
-      return c.vectors;
-    }
-  } catch (e) {}
-  return null;
-}
-
-function writeCache(fp, vectors) {
-  try {
-    localStorage.setItem(KB_CACHE_KEY, JSON.stringify({ fp: fp, vectors: vectors }));
-  } catch (e) {}
-}
-
-async function loadKnowledge() {
-  if (!KB_USE) {
-    statusEl.hidden = true;
-    return;
-  }
-  const run = ++kbRun;
-  kb.notes = [];
-  kb.vectors = null;
-  kb.problem = "";
-  kb.wantsKey = false;
-  kb.queryFailed = false;
-  setStatus("📚 Loading notes…");
-
-  let raw = "";
-  try {
-    const res = await fetch(KB_FILE, { cache: "no-cache" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    raw = await res.text();
-  } catch (e) {
-    if (run !== kbRun) return;
-    kb.problem = "Couldn't find " + KB_FILE + ". Check that it's in the same folder as index.html.";
-    showKbStatus();
-    return;
-  }
-  if (run !== kbRun) return;
-
-  kb.notes = parseKnowledge(raw);
-  if (kb.notes.length === 0) {
-    kb.problem = KB_FILE + " has no notes yet. Start each note with ## and a title.";
-    showKbStatus();
-    return;
-  }
-
-  if (KB_METHOD !== "meaning") {
-    showKbStatus();
-    return;
-  }
-  if (!getKey()) {
-    kb.wantsKey = true;
-    showKbStatus();
-    return;
-  }
-
-  const fp = fingerprint(raw);
-  const cached = readCache(fp);
-  if (cached) {
-    kb.vectors = cached;
-    showKbStatus();
-    return;
-  }
-
-  setStatus("📚 " + kb.notes.length + " notes loaded · preparing meaning search…");
-  try {
-    const texts = kb.notes.map((n) => "title: " + n.title + " | text: " + n.text);
-    const vectors = await embedTexts(texts);
-    if (run !== kbRun) return;
-    kb.vectors = vectors;
-    writeCache(fp, vectors);
-  } catch (e) {
-    if (run !== kbRun) return;
-    kb.vectors = null; // falls back to keyword search
-  }
-  showKbStatus();
-}
-
-// ---------- Knowledge base: embeddings ("meaning" search) ----------
-async function embedTexts(texts) {
-  const url = API_BASE + encodeURIComponent(KB_MODEL) + ":batchEmbedContents";
-  const vectors = [];
-  for (let i = 0; i < texts.length; i += KB_BATCH) {
-    const chunk = texts.slice(i, i + KB_BATCH);
-    const body = {
-      requests: chunk.map((t) => ({
-        model: "models/" + KB_MODEL,
-        content: { parts: [{ text: t }] }
-      }))
-    };
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": getKey()
-      },
-      body: JSON.stringify(body)
-    });
-    if (!res.ok) {
-      const err = new Error("HTTP " + res.status);
-      err.status = res.status;
-      throw err;
-    }
-    const data = await res.json();
-    const embeddings = data.embeddings || [];
-    if (embeddings.length !== chunk.length) {
-      throw new Error("Unexpected embedding response");
-    }
-    embeddings.forEach((e) => vectors.push(e.values));
-  }
-  return vectors;
-}
-
-function cosine(a, b) {
-  let dot = 0, na = 0, nb = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
-}
-
-// ---------- Knowledge base: keyword search ----------
-const STOP_WORDS = new Set([
-  "the", "and", "for", "are", "but", "not", "you", "your", "can", "does", "did",
-  "how", "what", "when", "where", "which", "who", "why", "with", "this", "that",
-  "these", "those", "from", "have", "has", "had", "was", "were", "will", "would",
-  "should", "could", "about", "into", "than", "then", "there", "their", "they",
-  "them", "its", "our", "any", "all", "out", "too", "very", "just", "tell", "give"
-]);
-
-function tokenize(text) {
-  const words = (text.toLowerCase().match(/[a-z0-9]+/g) || [])
-    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
-    .map((w) => {
-      if (w.length > 4 && w.endsWith("ing")) return w.slice(0, -3);
-      if (w.length > 4 && w.endsWith("es")) return w.slice(0, -2);
-      if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
-      return w;
-    });
-  return words;
-}
-
-function keywordSearch(question) {
-  const terms = Array.from(new Set(tokenize(question)));
-  if (!terms.length) return [];
-  const hits = kb.notes.map((n) => {
-    const titleWords = new Set(tokenize(n.title));
-    const bodyWords = new Set(tokenize(n.text));
-    let points = 0;
-    for (const t of terms) {
-      if (titleWords.has(t)) points += 3; // a title match counts the most
-      if (bodyWords.has(t)) points += 1;
-    }
-    return { title: n.title, text: n.text, score: Math.min(1, points / (terms.length * 4)) };
-  });
-  return hits
-    .filter((h) => h.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, KB_TOPK);
-}
-
-// Finds the best notes for a question. It never throws:
-// if meaning search fails, it uses keyword search instead.
-async function findNotes(question) {
-  if (!KB_USE) return [];
-  try { await kbPromise; } catch (e) {}
-  if (!kb.notes.length) return [];
-
-  if (kb.vectors) {
-    try {
-      const vecs = await embedTexts(["task: search result | query: " + question]);
-      const q = vecs[0];
-      const hits = kb.notes.map((n, i) => ({
-        title: n.title,
-        text: n.text,
-        score: cosine(q, kb.vectors[i])
-      }));
-      hits.sort((a, b) => b.score - a.score);
-      if (kb.queryFailed) {
-        kb.queryFailed = false;
-        showKbStatus();
-      }
-      return hits.slice(0, KB_TOPK);
-    } catch (e) {
-      kb.queryFailed = true;
-      showKbStatus();
-    }
-  }
-  return keywordSearch(question);
-}
-
-// Puts the chosen notes and the question into one message for Gemini.
-function buildPrompt(question, notes) {
-  let out = "NOTES:\n";
-  if (!notes.length) {
-    out += "(No matching notes were found.)\n";
-  } else {
-    notes.forEach((n, i) => {
-      out += "[" + (i + 1) + "] " + n.title + "\n" + n.text + "\n\n";
-    });
-  }
-  out += "\nQUESTION:\n" + question;
-  return out;
 }
 
 // ---------- Talking to Gemini ----------
@@ -528,48 +190,52 @@ function friendlyError(status) {
     return "Too many requests right now. Wait a minute and try again.";
   }
   if (status >= 500) {
-    return "Google's server is having trouble. Please try again in a moment.";
+    return "Google's server is having trouble (error " + status + "). Please try again in a moment.";
   }
   return "Something went wrong (error " + status + "). Please try again.";
 }
 
-async function askGemini(notes) {
-  const key = getKey();
-  const url = API_BASE + encodeURIComponent(cfg.model) + ":generateContent";
+// A short reason, used in the status line
+function shortReason(err) {
+  const s = err && err.status;
+  if (!s) return "no internet or blocked request";
+  if (s === 400 || s === 403) return "API key not accepted";
+  if (s === 404) return "embedding model not found, check embeddingModel in config.js";
+  if (s === 429) return "rate limit";
+  if (s >= 500) return "Google server error " + s;
+  return "error " + s;
+}
 
-  // The saved history keeps only the plain questions. For this one request,
-  // the latest question is swapped for a version that includes the notes.
-  let contents = history;
-  let system = cfg.systemInstruction;
-  if (KB_USE) {
-    const last = history[history.length - 1];
-    contents = history.slice(0, -1).concat([
-      { role: "user", parts: [{ text: buildPrompt(last.parts[0].text, notes) }] }
-    ]);
-    if (cfg.knowledgeRules) system += "\n\n" + cfg.knowledgeRules;
-  }
-
-  const body = {
-    systemInstruction: { parts: [{ text: system }] },
-    contents: contents
-  };
-
-  const res = await fetch(url, {
+// One place that talks to Gemini
+async function callGemini(model, method, body) {
+  const res = await fetch(API_BASE + encodeURIComponent(model) + ":" + method, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-goog-api-key": key
+      "x-goog-api-key": getKey()
     },
     body: JSON.stringify(body)
   });
-
   if (!res.ok) {
     const err = new Error("HTTP " + res.status);
     err.status = res.status;
     throw err;
   }
+  return res.json();
+}
 
-  const data = await res.json();
+async function askGemini(promptText) {
+  // History holds plain questions; swap in the version with notes for this turn
+  const contents = history
+    .slice(0, -1)
+    .concat([{ role: "user", parts: [{ text: promptText }] }]);
+  const rules = kbActive() ? "\n\n" + cfg.knowledgeRules : "";
+
+  const data = await callGemini(cfg.model, "generateContent", {
+    systemInstruction: { parts: [{ text: cfg.systemInstruction + rules }] },
+    contents: contents
+  });
+
   const parts =
     (data.candidates &&
       data.candidates[0] &&
@@ -583,6 +249,241 @@ async function askGemini(notes) {
   return text.trim();
 }
 
+// ---------- Knowledge base: loading ----------
+function kbActive() {
+  return !!cfg.useKnowledge && kb.chunks.length > 0;
+}
+
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+function updateStatus() {
+  if (!cfg.useKnowledge) { setStatus(""); return; }
+  if (kb.problem) { setStatus("⚠️ " + kb.problem); return; }
+  const n = kb.chunks.length;
+  let s = "📚 " + n + " note" + (n === 1 ? "" : "s") + " loaded · ";
+  if (cfg.searchMethod === "keywords") s += "keyword search";
+  else if (kb.vectors) s += "meaning search";
+  else if (kb.embedError) s += "keyword search (meaning search failed: " + kb.embedError + ")";
+  else if (!getKey()) s += "add your API key to start meaning search";
+  else s += "getting meaning search ready…";
+  setStatus(s);
+}
+
+// Turn knowledge.md into a list of notes. Each note starts with "## Title".
+function parseKnowledge(md) {
+  const lines = md.replace(/\r/g, "").split("\n");
+  const notes = [];
+  let cur = null;
+  for (const line of lines) {
+    const m = line.match(/^##\s+(.+?)\s*$/);
+    if (m) {
+      cur = { title: m[1], lines: [] };
+      notes.push(cur);
+    } else if (cur) {
+      cur.lines.push(line);
+    }
+  }
+  const chunks = [];
+  for (const note of notes) {
+    const text = note.lines.join("\n").trim();
+    if (!text) continue;
+    const parts = splitLong(text, 1500);
+    parts.forEach((p, i) => {
+      const title = parts.length > 1 ? note.title + " (part " + (i + 1) + ")" : note.title;
+      chunks.push({ title: title, text: p });
+    });
+  }
+  return chunks;
+}
+
+// Split a long note at blank lines
+function splitLong(text, max) {
+  if (text.length <= max) return [text];
+  const paras = text.split(/\n\s*\n/);
+  const parts = [];
+  let cur = "";
+  for (const p of paras) {
+    if (cur && cur.length + p.length + 2 > max) {
+      parts.push(cur);
+      cur = p;
+    } else {
+      cur = cur ? cur + "\n\n" + p : p;
+    }
+  }
+  if (cur) parts.push(cur);
+  return parts;
+}
+
+// A short "fingerprint" so we only re-embed when knowledge.md changes
+function fingerprint(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36) + "-" + s.length;
+}
+
+async function loadKnowledge() {
+  kb = { raw: "", chunks: [], vectors: null, problem: "", embedError: "" };
+  if (!cfg.useKnowledge) { updateStatus(); return; }
+  setStatus("📚 Loading notes…");
+
+  try {
+    const res = await fetch(cfg.knowledgeFile, { cache: "no-store" });
+    if (!res.ok) throw new Error("missing");
+    kb.raw = await res.text();
+  } catch (e) {
+    kb.problem = "Couldn't find " + cfg.knowledgeFile + ". Check the file name and that it isn't inside a folder.";
+    updateStatus();
+    return;
+  }
+
+  kb.chunks = parseKnowledge(kb.raw);
+  if (!kb.chunks.length) {
+    kb.problem = cfg.knowledgeFile + " has no notes. Each note must start with ## and a title.";
+    updateStatus();
+    return;
+  }
+
+  updateStatus();
+  await ensureEmbeddings();
+}
+
+// ---------- Knowledge base: embeddings ----------
+async function embedBatch(texts) {
+  const data = await callGemini(cfg.embeddingModel, "batchEmbedContents", {
+    requests: texts.map((t) => ({
+      model: "models/" + cfg.embeddingModel,
+      content: { parts: [{ text: t }] }
+    }))
+  });
+  const list = (data.embeddings || []).map((e) => e.values);
+  if (list.length !== texts.length) throw new Error("Unexpected embedding reply");
+  return list;
+}
+
+function ensureEmbeddings() {
+  if (kb.vectors || cfg.searchMethod !== "meaning" || !kb.chunks.length || !getKey()) {
+    updateStatus();
+    return Promise.resolve();
+  }
+  if (!embedPromise) {
+    embedPromise = buildEmbeddings().then(
+      () => { embedPromise = null; },
+      () => { embedPromise = null; }
+    );
+  }
+  return embedPromise;
+}
+
+async function buildEmbeddings() {
+  const fp = fingerprint(kb.raw) + "|" + cfg.embeddingModel;
+
+  // Reuse saved vectors if knowledge.md hasn't changed
+  try {
+    const saved = JSON.parse(localStorage.getItem(CACHE_NAME));
+    if (saved && saved.fp === fp && saved.vectors && saved.vectors.length === kb.chunks.length) {
+      kb.vectors = saved.vectors;
+      kb.embedError = "";
+      updateStatus();
+      return;
+    }
+  } catch (e) {}
+
+  setStatus("📚 " + kb.chunks.length + " notes loaded · building meaning search…");
+  try {
+    const texts = kb.chunks.map((c) => "title: " + c.title + " │ text: " + c.text);
+    let vectors = [];
+    for (let i = 0; i < texts.length; i += 50) {
+      vectors = vectors.concat(await embedBatch(texts.slice(i, i + 50)));
+    }
+    kb.vectors = vectors;
+    kb.embedError = "";
+    try {
+      const small = vectors.map((v) => v.map((x) => Math.round(x * 1e5) / 1e5));
+      localStorage.setItem(CACHE_NAME, JSON.stringify({ fp: fp, vectors: small }));
+    } catch (e) {}
+  } catch (err) {
+    kb.embedError = shortReason(err);
+  }
+  updateStatus();
+}
+
+// ---------- Knowledge base: searching ----------
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
+}
+
+const STOP_WORDS = new Set(
+  "a an the and or of to in on is are was were be do does did i my me you your it its for with as at by from this that what how why when which can about".split(" ")
+);
+
+function words(s) {
+  return (s.toLowerCase().match(/[a-z0-9]+/g) || [])
+    .filter((w) => w.length > 1 && !STOP_WORDS.has(w))
+    .map((w) => (w.length > 3 ? w.replace(/s$/, "") : w));
+}
+
+// Simple keyword search: title matches count double
+function keywordScores(question) {
+  const qw = Array.from(new Set(words(question)));
+  return kb.chunks.map((c) => {
+    const inTitle = new Set(words(c.title));
+    const inBody = new Set(words(c.text));
+    let hits = 0;
+    for (const w of qw) {
+      if (inTitle.has(w)) hits += 2;
+      else if (inBody.has(w)) hits += 1;
+    }
+    return { chunk: c, score: qw.length ? hits / (2 * qw.length) : 0 };
+  });
+}
+
+// Find the best notes for a question
+async function retrieve(question) {
+  const topK = Math.max(1, Number(cfg.topK) || 3);
+  let scored = null;
+  let method = "keywords";
+
+  if (cfg.searchMethod === "meaning") {
+    await ensureEmbeddings();
+    if (kb.vectors) {
+      try {
+        const q = await embedBatch(["task: search result │ query: " + question]);
+        scored = kb.chunks.map((c, i) => ({ chunk: c, score: cosine(q[0], kb.vectors[i]) }));
+        method = "meaning";
+      } catch (err) {
+        scored = null; // fall back to keywords for this question
+      }
+    }
+  }
+
+  if (!scored) {
+    scored = keywordScores(question).filter((s) => s.score > 0);
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { sources: scored.slice(0, topK), method: method };
+}
+
+// Put the notes and the question together, numbered [1] [2] [3]
+function buildPrompt(question, sources) {
+  if (!kbActive()) return question;
+  if (!sources.length) {
+    return "NOTES:\n(No matching notes were found.)\n\nQUESTION: " + question;
+  }
+  const notes = sources
+    .map((s, i) => "[" + (i + 1) + "] " + s.chunk.title + "\n" + s.chunk.text)
+    .join("\n\n");
+  return "NOTES:\n" + notes + "\n\nQUESTION: " + question;
+}
+
+// ---------- Sending a message ----------
 async function sendMessage(text) {
   text = text.trim();
   if (!text || busy) return;
@@ -604,17 +505,23 @@ async function sendMessage(text) {
   const thinking = addThinking();
 
   try {
-    let notes = [];
-    try { notes = await findNotes(text); } catch (e) { notes = []; }
+    let sources = [];
+    let method = "keywords";
+    if (kbActive()) {
+      const found = await retrieve(text);
+      sources = found.sources;
+      method = found.method;
+    }
 
-    const reply = await askGemini(notes);
+    const reply = await askGemini(buildPrompt(text, sources));
     thinking.remove();
     if (!reply) {
       history.pop();
       addBubble("error", "I couldn't come up with an answer to that. Try rephrasing your question.");
     } else {
       history.push({ role: "model", parts: [{ text: reply }] });
-      addBubble("bot", reply, notes);
+      const bubble = addBubble("bot", reply);
+      if (kbActive()) addSources(bubble, sources, method);
     }
   } catch (err) {
     thinking.remove();
@@ -661,7 +568,9 @@ $("key-save").addEventListener("click", () => {
   if (!key) return;
   saveKey(key, rememberBox.checked);
   closeKeyModal();
-  kbPromise = loadKnowledge(); // a new key may unlock meaning search
+  kb.embedError = "";
+  updateStatus();
+  ensureEmbeddings(); // build meaning search now that we have a key
 });
 
 keyModal.addEventListener("click", (e) => {
